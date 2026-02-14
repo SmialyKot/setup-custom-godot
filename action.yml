@@ -70,6 +70,23 @@ inputs:
     description: >-
       True to cache downloads.
     default: true
+  custom-repo:
+    description: >-
+      Custom GitHub repository to download Godot from (e.g., 'limbonaut/limboai').
+      When specified, downloads will be fetched from this repository's releases instead of the official Godot repository.
+    default: ''
+  custom-asset-name:
+    description: >-
+      Name pattern for the custom Godot asset to download from the custom repository (e.g., 'limboai-linux-x86_64.zip').
+      Use {platform} placeholder for platform-specific downloads (linux, windows, macos).
+      Required when custom-repo is specified.
+    default: ''
+  godot-version:
+    description: >-
+      Godot version for custom repository builds (e.g., '4.3.0').
+      This is the actual Godot version the custom build is based on.
+      When using custom-repo, the 'version' input becomes the release tag, and this input specifies the Godot version.
+    default: ''
 runs:
   using: 'node20'
   main: 'dist/index.js'

@@ -40,7 +40,8 @@ export class Linux implements Platform {
     return '_linux.x86_64'
   }
   isGodotExecutable(basename: string): boolean {
-    return basename.toLowerCase().endsWith('x86_64')
+    const lower = basename.toLowerCase()
+    return lower.includes('x86_64') && (lower.startsWith('godot') || lower.includes('.godot'))
   }
   getUnzippedPath(
     installationDir: string,
@@ -135,19 +136,32 @@ export function parseVersion(version: string): SemanticVersion {
 
 /**
  * Returns the Godot download url for the given version and platform.
- * @param versionString Version string.
+ * @param releaseVersion Release version/tag string (for custom repos, this is the release tag).
+ * @param godotVersion Godot version string (actual Godot version for templates/export).
  * @param platform Current platform instance.
  * @param useDotnet True to use the .NET-enabled version of Godot.
  * @param isTemplate True to return the url for the template
+ * @param customRepo Optional custom GitHub repository (e.g., 'limbonaut/limboai')
+ * @param customAssetName Optional custom asset name pattern (e.g., 'limboai-{platform}.zip')
  * @returns Godot binary download url.
  */
 export function getGodotUrl(
-  versionString: string,
+  releaseVersion: string,
+  godotVersion: string,
   platform: Platform,
   useDotnet: boolean,
-  isTemplate: boolean
+  isTemplate: boolean,
+  customRepo?: string,
+  customAssetName?: string
 ): string {
-  const version = parseVersion(versionString)
+  // If custom repository is specified, use custom URL
+  if (customRepo && customAssetName && !isTemplate) {
+    const platformName = getPlatformName(platform)
+    const assetName = customAssetName.replace('{platform}', platformName)
+    return `https://github.com/${customRepo}/releases/download/${releaseVersion}/${assetName}`
+  }
+
+  const version = parseVersion(godotVersion)
   const major = version.major
   const minor = version.minor
   const patch = version.patch
@@ -170,6 +184,22 @@ export function getGodotUrl(
   return `${url}${getGodotFilenameBase(version)}${
     useDotnet ? '_mono' : ''
   }_export_templates.tpz`
+}
+
+/**
+ * Returns the platform name for custom repository downloads
+ * @param platform Current platform instance
+ * @returns Platform name string (linux, windows, macos)
+ */
+function getPlatformName(platform: Platform): string {
+  if (platform instanceof Linux) {
+    return 'linux'
+  } else if (platform instanceof Windows) {
+    return 'windows'
+  } else if (platform instanceof MacOS) {
+    return 'macos'
+  }
+  throw new Error('Unknown platform')
 }
 
 /**

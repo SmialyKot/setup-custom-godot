@@ -29,6 +29,9 @@ async function run(platform: Platform): Promise<void> {
   const checkoutDirectory = process.env['GITHUB_WORKSPACE'] ?? ''
   const includeTemplates = core.getBooleanInput('include-templates')
   const useCache = core.getBooleanInput('cache')
+  const customRepo = core.getInput('custom-repo').replace(/\s/g, '')
+  const customAssetName = core.getInput('custom-asset-name').replace(/\s/g, '')
+  const godotVersion = core.getInput('godot-version').replace(/\s/g, '')
 
   const userDir = os.homedir()
   const downloadsDir = path.join(userDir, downloadsRelativePath)
@@ -64,25 +67,31 @@ async function run(platform: Platform): Promise<void> {
   }
 
   // Compute derived information from Godot version.
-  const versionName = getGodotFilenameFromVersionString(
+  const actualGodotVersion = customRepo && godotVersion ? godotVersion : version
+  const versionName = customRepo
+    ? `${customRepo.replace('/', '_')}_${version}`
+    : getGodotFilenameFromVersionString(actualGodotVersion, platform, useDotnet)
+  const godotUrl = getGodotUrl(
     version,
+    actualGodotVersion,
     platform,
-    useDotnet
+    useDotnet,
+    false,
+    customRepo || undefined,
+    customAssetName || undefined
   )
-  const godotUrl = getGodotUrl(version, platform, useDotnet, false)
   const godotDownloadPath = path.join(downloadsDir, `${versionName}.zip`)
-  const godotInstallationPath = platform.getUnzippedPath(
-    installationDir,
-    versionName,
-    useDotnet
-  )
+  // For custom repos, extract directly to installationDir; for official Godot, use subdirectory
+  const godotInstallationPath = customRepo
+    ? installationDir
+    : platform.getUnzippedPath(installationDir, versionName, useDotnet)
   const binDir = path.join(userDir, binRelativePath)
 
   const exportTemplateUrl = includeTemplates
-    ? getGodotUrl(version, platform, useDotnet, true)
+    ? getGodotUrl(version, actualGodotVersion, platform, useDotnet, true)
     : ''
   const exportTemplatePath = includeTemplates
-    ? getExportTemplatePath(version, platform, useDotnet)
+    ? getExportTemplatePath(actualGodotVersion, platform, useDotnet)
     : ''
   const exportTemplateDownloadPath = includeTemplates
     ? path.join(downloadsDir, 'export_templates.zip')
@@ -91,6 +100,13 @@ async function run(platform: Platform): Promise<void> {
   core.info(`🤖 Godot version: ${version}`)
   core.info(`🤖 Godot version name: ${versionName}`)
   core.info(`🟣 Use .NET: ${useDotnet}`)
+  if (customRepo) {
+    core.info(`🎨 Custom repository: ${customRepo}`)
+    core.info(`🎨 Custom asset name: ${customAssetName}`)
+    if (godotVersion) {
+      core.info(`🎨 Base Godot version: ${godotVersion}`)
+    }
+  }
   core.info(`🤖 Godot download url: ${godotUrl}`)
   core.info(`🧑‍💼 User directory: ${userDir}`)
   core.info(`🌏 Downloads directory: ${downloadsDir}`)
@@ -159,11 +175,32 @@ async function run(platform: Platform): Promise<void> {
       if (fs.existsSync(installationDir))
         fs.rmSync(installationDir, {recursive: true, force: true})
 
-      const godotExtractedPath = await toolsCache.extractZip(
+      let godotExtractedPath = await toolsCache.extractZip(
         godotDownloadedPath,
         installationDir
       )
       core.info(`✅ Godot extracted to ${godotExtractedPath}`)
+
+      // Check if there's a nested zip file (for double-zipped releases like LimboAI)
+      if (customRepo) {
+        const files = await fs.promises.readdir(installationDir)
+        const nestedZip = files.find(file => file.toLowerCase().endsWith('.zip'))
+
+        if (nestedZip) {
+          core.info(`🔍 Found nested zip file: ${nestedZip}`)
+          const nestedZipPath = path.join(installationDir, nestedZip)
+
+          core.info(`📦 Extracting nested zip to ${installationDir}...`)
+          godotExtractedPath = await toolsCache.extractZip(
+            nestedZipPath,
+            installationDir
+          )
+
+          // Remove the nested zip file after extraction
+          fs.rmSync(nestedZipPath)
+          core.info(`✅ Nested zip extracted and removed`)
+        }
+      }
       core.endGroup()
 
       // Show extracted Godot files recursively and list executables.
@@ -315,6 +352,39 @@ async function run(platform: Platform): Promise<void> {
       core.info(`✅ Symlink to GodotSharp created at ${godotSharpDirAlias}`)
     }
     core.endGroup()
+
+    // Setup NuGet packages for custom repos with .NET support
+    if (customRepo && useDotnet) {
+      core.startGroup(`📦 Setting up custom NuGet packages...`)
+      const godotSharpDir = path.join(path.dirname(godotSharp), '../..')
+      const nupkgsPath = path.join(godotSharpDir, 'Tools', 'nupkgs')
+
+      if (fs.existsSync(nupkgsPath)) {
+        core.info(`📦 Found NuGet packages at ${nupkgsPath}`)
+        const sourceName = `${customRepo.replace('/', '_')}_NugetSource`
+
+        try {
+          // Add the NuGet source
+          const addSourceCmd = `dotnet nuget add source "${nupkgsPath}" --name "${sourceName}"`
+          core.info(`🔧 Running: ${addSourceCmd}`)
+          child_process.execSync(addSourceCmd, { stdio: 'inherit' })
+          core.info(`✅ NuGet source '${sourceName}' added successfully`)
+        } catch (error) {
+          // Source might already exist, try to update it
+          try {
+            const updateSourceCmd = `dotnet nuget update source "${sourceName}" --source "${nupkgsPath}"`
+            core.info(`🔧 Source exists, updating: ${updateSourceCmd}`)
+            child_process.execSync(updateSourceCmd, { stdio: 'inherit' })
+            core.info(`✅ NuGet source '${sourceName}' updated successfully`)
+          } catch (updateError) {
+            core.warning(`⚠️ Could not add/update NuGet source: ${updateError}`)
+          }
+        }
+      } else {
+        core.warning(`⚠️ NuGet packages not found at ${nupkgsPath}`)
+      }
+      core.endGroup()
+    }
 
     // Add environment variables
     core.startGroup(`🔧 Adding environment variables...`)

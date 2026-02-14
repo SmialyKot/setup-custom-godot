@@ -76,6 +76,9 @@ function run(platform) {
         const checkoutDirectory = (_a = process.env['GITHUB_WORKSPACE']) !== null && _a !== void 0 ? _a : '';
         const includeTemplates = core.getBooleanInput('include-templates');
         const useCache = core.getBooleanInput('cache');
+        const customRepo = core.getInput('custom-repo').replace(/\s/g, '');
+        const customAssetName = core.getInput('custom-asset-name').replace(/\s/g, '');
+        const godotVersion = core.getInput('godot-version').replace(/\s/g, '');
         const userDir = os.homedir();
         const downloadsDir = path_1.default.join(userDir, downloadsRelativePath);
         const installationDir = path_1.default.join(userDir, pathRelative);
@@ -99,16 +102,22 @@ function run(platform) {
             version = (_c = globalJson['msbuild-sdks']['Godot.NET.Sdk']) !== null && _c !== void 0 ? _c : '';
         }
         // Compute derived information from Godot version.
-        const versionName = (0, utils_1.getGodotFilenameFromVersionString)(version, platform, useDotnet);
-        const godotUrl = (0, utils_1.getGodotUrl)(version, platform, useDotnet, false);
+        const actualGodotVersion = customRepo && godotVersion ? godotVersion : version;
+        const versionName = customRepo
+            ? `${customRepo.replace('/', '_')}_${version}`
+            : (0, utils_1.getGodotFilenameFromVersionString)(actualGodotVersion, platform, useDotnet);
+        const godotUrl = (0, utils_1.getGodotUrl)(version, actualGodotVersion, platform, useDotnet, false, customRepo || undefined, customAssetName || undefined);
         const godotDownloadPath = path_1.default.join(downloadsDir, `${versionName}.zip`);
-        const godotInstallationPath = platform.getUnzippedPath(installationDir, versionName, useDotnet);
+        // For custom repos, extract directly to installationDir; for official Godot, use subdirectory
+        const godotInstallationPath = customRepo
+            ? installationDir
+            : platform.getUnzippedPath(installationDir, versionName, useDotnet);
         const binDir = path_1.default.join(userDir, binRelativePath);
         const exportTemplateUrl = includeTemplates
-            ? (0, utils_1.getGodotUrl)(version, platform, useDotnet, true)
+            ? (0, utils_1.getGodotUrl)(version, actualGodotVersion, platform, useDotnet, true)
             : '';
         const exportTemplatePath = includeTemplates
-            ? (0, utils_1.getExportTemplatePath)(version, platform, useDotnet)
+            ? (0, utils_1.getExportTemplatePath)(actualGodotVersion, platform, useDotnet)
             : '';
         const exportTemplateDownloadPath = includeTemplates
             ? path_1.default.join(downloadsDir, 'export_templates.zip')
@@ -116,6 +125,13 @@ function run(platform) {
         core.info(`🤖 Godot version: ${version}`);
         core.info(`🤖 Godot version name: ${versionName}`);
         core.info(`🟣 Use .NET: ${useDotnet}`);
+        if (customRepo) {
+            core.info(`🎨 Custom repository: ${customRepo}`);
+            core.info(`🎨 Custom asset name: ${customAssetName}`);
+            if (godotVersion) {
+                core.info(`🎨 Base Godot version: ${godotVersion}`);
+            }
+        }
         core.info(`🤖 Godot download url: ${godotUrl}`);
         core.info(`🧑‍💼 User directory: ${userDir}`);
         core.info(`🌏 Downloads directory: ${downloadsDir}`);
@@ -171,8 +187,22 @@ function run(platform) {
                 // If the godot installation folder already exists, remove it before extracting the ZIP file. This will "uninstall" other installations (e.g. on version changes).
                 if (fs.existsSync(installationDir))
                     fs.rmSync(installationDir, { recursive: true, force: true });
-                const godotExtractedPath = yield toolsCache.extractZip(godotDownloadedPath, installationDir);
+                let godotExtractedPath = yield toolsCache.extractZip(godotDownloadedPath, installationDir);
                 core.info(`✅ Godot extracted to ${godotExtractedPath}`);
+                // Check if there's a nested zip file (for double-zipped releases like LimboAI)
+                if (customRepo) {
+                    const files = yield fs.promises.readdir(installationDir);
+                    const nestedZip = files.find(file => file.toLowerCase().endsWith('.zip'));
+                    if (nestedZip) {
+                        core.info(`🔍 Found nested zip file: ${nestedZip}`);
+                        const nestedZipPath = path_1.default.join(installationDir, nestedZip);
+                        core.info(`📦 Extracting nested zip to ${installationDir}...`);
+                        godotExtractedPath = yield toolsCache.extractZip(nestedZipPath, installationDir);
+                        // Remove the nested zip file after extraction
+                        fs.rmSync(nestedZipPath);
+                        core.info(`✅ Nested zip extracted and removed`);
+                    }
+                }
                 core.endGroup();
                 // Show extracted Godot files recursively and list executables.
                 core.startGroup(`📄 Showing extracted files recursively...`);
@@ -274,6 +304,39 @@ function run(platform) {
                 core.info(`✅ Symlink to GodotSharp created at ${godotSharpDirAlias}`);
             }
             core.endGroup();
+            // Setup NuGet packages for custom repos with .NET support
+            if (customRepo && useDotnet) {
+                core.startGroup(`📦 Setting up custom NuGet packages...`);
+                const godotSharpDir = path_1.default.join(path_1.default.dirname(godotSharp), '../..');
+                const nupkgsPath = path_1.default.join(godotSharpDir, 'Tools', 'nupkgs');
+                if (fs.existsSync(nupkgsPath)) {
+                    core.info(`📦 Found NuGet packages at ${nupkgsPath}`);
+                    const sourceName = `${customRepo.replace('/', '_')}_NugetSource`;
+                    try {
+                        // Add the NuGet source
+                        const addSourceCmd = `dotnet nuget add source "${nupkgsPath}" --name "${sourceName}"`;
+                        core.info(`🔧 Running: ${addSourceCmd}`);
+                        child_process.execSync(addSourceCmd, { stdio: 'inherit' });
+                        core.info(`✅ NuGet source '${sourceName}' added successfully`);
+                    }
+                    catch (error) {
+                        // Source might already exist, try to update it
+                        try {
+                            const updateSourceCmd = `dotnet nuget update source "${sourceName}" --source "${nupkgsPath}"`;
+                            core.info(`🔧 Source exists, updating: ${updateSourceCmd}`);
+                            child_process.execSync(updateSourceCmd, { stdio: 'inherit' });
+                            core.info(`✅ NuGet source '${sourceName}' updated successfully`);
+                        }
+                        catch (updateError) {
+                            core.warning(`⚠️ Could not add/update NuGet source: ${updateError}`);
+                        }
+                    }
+                }
+                else {
+                    core.warning(`⚠️ NuGet packages not found at ${nupkgsPath}`);
+                }
+                core.endGroup();
+            }
             // Add environment variables
             core.startGroup(`🔧 Adding environment variables...`);
             core.exportVariable('GODOT', godotAlias);
@@ -371,7 +434,8 @@ class Linux {
         return '_linux.x86_64';
     }
     isGodotExecutable(basename) {
-        return basename.toLowerCase().endsWith('x86_64');
+        const lower = basename.toLowerCase();
+        return lower.includes('x86_64') && (lower.startsWith('godot') || lower.includes('.godot'));
     }
     getUnzippedPath(installationDir, versionName, useDotnet) {
         return path.join(installationDir, versionName);
@@ -433,14 +497,23 @@ function parseVersion(version) {
 }
 /**
  * Returns the Godot download url for the given version and platform.
- * @param versionString Version string.
+ * @param releaseVersion Release version/tag string (for custom repos, this is the release tag).
+ * @param godotVersion Godot version string (actual Godot version for templates/export).
  * @param platform Current platform instance.
  * @param useDotnet True to use the .NET-enabled version of Godot.
  * @param isTemplate True to return the url for the template
+ * @param customRepo Optional custom GitHub repository (e.g., 'limbonaut/limboai')
+ * @param customAssetName Optional custom asset name pattern (e.g., 'limboai-{platform}.zip')
  * @returns Godot binary download url.
  */
-function getGodotUrl(versionString, platform, useDotnet, isTemplate) {
-    const version = parseVersion(versionString);
+function getGodotUrl(releaseVersion, godotVersion, platform, useDotnet, isTemplate, customRepo, customAssetName) {
+    // If custom repository is specified, use custom URL
+    if (customRepo && customAssetName && !isTemplate) {
+        const platformName = getPlatformName(platform);
+        const assetName = customAssetName.replace('{platform}', platformName);
+        return `https://github.com/${customRepo}/releases/download/${releaseVersion}/${assetName}`;
+    }
+    const version = parseVersion(godotVersion);
     const major = version.major;
     const minor = version.minor;
     const patch = version.patch;
@@ -458,6 +531,23 @@ function getGodotUrl(versionString, platform, useDotnet, isTemplate) {
     if (!isTemplate)
         return `${url}${getGodotFilename(version, platform, useDotnet)}.zip`;
     return `${url}${getGodotFilenameBase(version)}${useDotnet ? '_mono' : ''}_export_templates.tpz`;
+}
+/**
+ * Returns the platform name for custom repository downloads
+ * @param platform Current platform instance
+ * @returns Platform name string (linux, windows, macos)
+ */
+function getPlatformName(platform) {
+    if (platform instanceof Linux) {
+        return 'linux';
+    }
+    else if (platform instanceof Windows) {
+        return 'windows';
+    }
+    else if (platform instanceof MacOS) {
+        return 'macos';
+    }
+    throw new Error('Unknown platform');
 }
 /**
  * Returns the Godot export template local path
